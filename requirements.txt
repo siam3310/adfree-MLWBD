@@ -1,0 +1,5 @@
+reflex==0.8.20
+PyGithub
+beautifulsoup4
+requests
+lxml
