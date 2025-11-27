@@ -65,9 +65,9 @@ class SearchState(rx.State):
                 "Please enter a search term", duration=3000, close_button=True
             )
             return
-        if (
-            query.startswith("http://") or query.startswith("https://")
-        ) and "fojik.com" in query:
+        if (query.startswith("http://") or query.startswith("https://")) and (
+            "fojik.com" in query or "fojik.site" in query
+        ):
             yield rx.toast.info(
                 "Direct link detected! Redirecting to details...",
                 duration=3000,
@@ -80,17 +80,21 @@ class SearchState(rx.State):
         self.search_results = []
         yield
         try:
+            logging.info(f"Frontend: Starting search for '{query}'")
             results = search_movie(query)
             self.search_results = results
             if not results:
                 yield rx.toast.info(
-                    "No results found for your query", duration=3000, close_button=True
+                    "No results found. Try checking the spelling or use a different term.",
+                    duration=5000,
+                    close_button=True,
                 )
         except Exception as e:
-            logging.exception(f"Search error: {e}")
+            error_type = type(e).__name__
+            logging.exception(f"Search error in frontend ({error_type}): {e}")
             yield rx.toast.error(
-                "An error occurred while searching. Please try again.",
-                duration=5000,
+                f"Search failed ({error_type}): {str(e)}",
+                duration=6000,
                 close_button=True,
             )
         finally:

@@ -1,9 +1,82 @@
-import requests
+import cloudscraper
 import re
 import ast
 import json
 import logging
+import time
+import random
 from bs4 import BeautifulSoup
+from requests.exceptions import Timeout, ConnectionError, HTTPError, RequestException
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+]
+
+
+def get_scraper():
+    scraper = cloudscraper.create_scraper(
+        browser={"browser": "chrome", "platform": "windows", "mobile": False}, delay=5
+    )
+    user_agent = random.choice(USER_AGENTS)
+    scraper.headers.update(
+        {
+            "User-Agent": user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+        }
+    )
+    return scraper
+
+
+def request_with_retry(scraper, method, url, max_retries=4, timeout=45, **kwargs):
+    for attempt in range(max_retries + 1):
+        try:
+            logging.info(f"Request attempt {attempt + 1}/{max_retries + 1} for {url}")
+            if method.lower() == "post":
+                response = scraper.post(url, timeout=timeout, **kwargs)
+            else:
+                response = scraper.get(url, timeout=timeout, **kwargs)
+            if response.status_code != 200:
+                logging.warning(f"Non-200 status code {response.status_code} for {url}")
+            response.raise_for_status()
+            return response
+        except Timeout:
+            logging.error(f"Timeout error on attempt {attempt + 1} for {url}")
+            if attempt == max_retries:
+                logging.exception(f"Max retries reached (Timeout) for {url}")
+                return None
+        except ConnectionError:
+            logging.error(f"Connection error on attempt {attempt + 1} for {url}")
+            if attempt == max_retries:
+                logging.exception(f"Max retries reached (ConnectionError) for {url}")
+                return None
+        except HTTPError as e:
+            logging.error(
+                f"HTTP error {(e.response.status_code if e.response else 'unknown')} on attempt {attempt + 1} for {url}"
+            )
+            if attempt == max_retries:
+                logging.exception(f"Max retries reached (HTTPError) for {url}")
+                return None
+        except Exception as e:
+            logging.error(f"General error on attempt {attempt + 1} for {url}: {e}")
+            if attempt == max_retries:
+                logging.exception(f"Max retries reached (General) for {url}")
+                return None
+        sleep_time = 2 ** (attempt + 1)
+        logging.info(f"Retrying in {sleep_time} seconds...")
+        time.sleep(sleep_time)
+    return None
 
 
 def extract_all_links(soup):
@@ -64,47 +137,41 @@ def extract_all_links(soup):
 
 
 def search_movie(text):
-    cookies = {
-        "starstruck_c64520dd9f1cfb797aa415c1816a487c": "17056c72fb574b1051c60a2706bd4d07",
-        "cf_clearance": "NunVbXqcDNvo09Xs5c63zOt0K4K4GclzRsLXDDQWv2E-1745647886-1.2.1.1-gVDTFu3OhRXXm0YTtWRHth_XWJEZcuXSItfxvnWqfBUm4kG9FI5HJOWEeIDBZ2_Ob8q4x.VwB_oxJh59ut_FQUSZio1Y4sBh5WHjtxsVL0c2yftAU5lVqEGQKStDNj8i.pQG3aZ4bcAdakso5XXHTeuV2ZIPhUsm8xbVKPRyVZkM4.3paqJeCDY7EoDxHA_8gg2h7Cc.anyPtfN0JuX9Mvs6gg7SYP5fMVL02XyinNpmdfOOWAxIswRtLmih6o_Kbr4vU.oz4DdeL9p0fg2gP8RNLwtoQeDT7k4RCcP45pTkRWei1P4yfOoBJf5RGMdoqaeEgh5RVptJlvO32RifsIJ4MMatkc35b_UVwVa91so",
-        "aiADB": "cfcdbee",
-        "prefetchAd_7970848": "true",
-    }
-    headers = {
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "accept-language": "en-US,en;q=0.6",
-        "priority": "u=0, i",
-        "referer": "https://fojik.com/",
-        "sec-fetch-dest": "document",
-        "sec-fetch-mode": "navigate",
-        "sec-fetch-site": "same-origin",
-        "sec-fetch-user": "?1",
-        "sec-gpc": "1",
-        "upgrade-insecure-requests": "1",
-        "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-    }
-    params = {"s": text}
     try:
-        resp = requests.get(
-            "https://fojik.com/", params=params, cookies=cookies, headers=headers
-        )
+        scraper = get_scraper()
+        params = {"s": text}
+        logging.info(f"Searching for movie: {text}")
+        resp = request_with_retry(scraper, "get", "https://fojik.site/", params=params)
+        if not resp:
+            logging.error("No response received from search")
+            return []
         soup = BeautifulSoup(resp.text, "html.parser")
-        movies_div = soup.find_all("article", class_="item")
+        movies_div = soup.find_all("article")
+        logging.info(f"Found {len(movies_div)} article elements in search results")
         results = []
         for movie_div in movies_div:
-            a_tag = movie_div.find("a", href=True)
-            img_tag = movie_div.find("img", src=True)
-            title_tag = movie_div.find("h3", class_="title")
-            if title_tag:
-                title = title_tag.get_text(strip=True)
-            elif img_tag and img_tag.get("alt"):
-                title = img_tag["alt"]
-            else:
-                title = ""
-            link = a_tag["href"] if a_tag else ""
-            image = img_tag["src"] if img_tag else ""
-            if title and link:
-                results.append({"title": title, "image": image, "link": link})
+            try:
+                title_div = movie_div.find("div", class_="title")
+                a_tag = (
+                    title_div.find("a") if title_div else movie_div.find("a", href=True)
+                )
+                img_tag = movie_div.find("img", src=True)
+                if a_tag:
+                    title = a_tag.get_text(strip=True)
+                elif img_tag and img_tag.get("alt"):
+                    title = img_tag["alt"]
+                else:
+                    title = ""
+                link = a_tag["href"] if a_tag else ""
+                image = img_tag["src"] if img_tag else ""
+                if title and link:
+                    results.append({"title": title, "image": image, "link": link})
+            except Exception as inner_e:
+                logging.exception(
+                    f"Skipping a movie element due to parse error: {inner_e}"
+                )
+                continue
+        logging.info(f"Successfully parsed {len(results)} movies from search")
         return results
     except Exception as e:
         logging.exception(f"Error searching movie: {e}")
@@ -112,37 +179,19 @@ def search_movie(text):
 
 
 def get_latest_movies(page=1):
-    cookies = {
-        "starstruck_c64520dd9f1cfb797aa415c1816a487c": "17056c72fb574b1051c60a2706bd4d07",
-        "cf_clearance": "NunVbXqcDNvo09Xs5c63zOt0K4K4GclzRsLXDDQWv2E-1745647886-1.2.1.1-gVDTFu3OhRXXm0YTtWRHth_XWJEZcuXSItfxvnWqfBUm4kG9FI5HJOWEeIDBZ2_Ob8q4x.VwB_oxJh59ut_FQUSZio1Y4sBh5WHjtxsVL0c2yftAU5lVqEGQKStDNj8i.pQG3aZ4bcAdakso5XXHTeuV2ZIPhUsm8xbVKPRyVZkM4.3paqJeCDY7EoDxHA_8gg2h7Cc.anyPtfN0JuX9Mvs6gg7SYP5fMVL02XyinNpmdfOOWAxIswRtLmih6o_Kbr4vU.oz4DdeL9p0fg2gP8RNLwtoQeDT7k4RCcP45pTkRWei1P4yfOoBJf5RGMdoqaeEgh5RVptJlvO32RifsIJ4MMatkc35b_UVwVa91so",
-        "aiADB": "cfcdbee",
-        "prefetchAd_7970848": "true",
-    }
-    headers = {
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "accept-language": "en-US,en;q=0.6",
-        "priority": "u=0, i",
-        "referer": "https://fojik.com/",
-        "sec-fetch-dest": "document",
-        "sec-fetch-mode": "navigate",
-        "sec-fetch-site": "same-origin",
-        "sec-fetch-user": "?1",
-        "sec-gpc": "1",
-        "upgrade-insecure-requests": "1",
-        "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
-    }
-    url = f"https://fojik.com/page/{page}/"
+    scraper = get_scraper()
+    url = f"https://fojik.site/page/{page}/"
     try:
-        resp = requests.get(url, cookies=cookies, headers=headers)
+        resp = request_with_retry(scraper, "get", url)
         soup = BeautifulSoup(resp.text, "html.parser")
-        movies_div = soup.find_all("article", class_="item")
+        movies_div = soup.find_all("article")
         results = []
         for movie_div in movies_div:
-            a_tag = movie_div.find("a", href=True)
+            title_div = movie_div.find("div", class_="title")
+            a_tag = title_div.find("a") if title_div else movie_div.find("a", href=True)
             img_tag = movie_div.find("img", src=True)
-            title_tag = movie_div.find("h3", class_="title")
-            if title_tag:
-                title = title_tag.get_text(strip=True)
+            if a_tag:
+                title = a_tag.get_text(strip=True)
             elif img_tag and img_tag.get("alt"):
                 title = img_tag["alt"].strip()
             else:
@@ -158,59 +207,98 @@ def get_latest_movies(page=1):
 
 
 def get_download_links(url):
-    default_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-    }
+    scraper = get_scraper()
+    logging.info(f"Starting download link extraction for: {url}")
     try:
-        response = requests.get(url, headers=default_headers)
+        response = request_with_retry(scraper, "get", url)
+        if not response:
+            logging.error(f"Failed to load initial URL: {url}")
+            return []
         soup = BeautifulSoup(response.text, "html.parser")
         fu_input = soup.find("input", {"type": "hidden", "name": "FU"})
         fn_input = soup.find("input", {"type": "hidden", "name": "FN"})
         if not fu_input or not fn_input:
-            print("Could not find FU or FN inputs")
+            logging.error("Could not find FU or FN inputs on initial page")
             return []
         FU = fu_input["value"]
         FN = fn_input["value"]
-        response = requests.post(
+        logging.info("Step 1: Found FU and FN inputs")
+        response = request_with_retry(
+            scraper,
+            "post",
             "https://search.technews24.site/blog.php",
-            headers=default_headers,
             data={"FU": FU, "FN": FN},
+            headers={"Referer": url},
         )
         soup = BeautifulSoup(response.text, "html.parser")
         fu2_input = soup.find("input", {"type": "hidden", "name": "FU2"})
         if not fu2_input:
-            print("Could not find FU2 input")
+            logging.error(
+                "Step 2 Failed: Could not find FU2 input in blog.php response"
+            )
             return []
         FU2 = fu2_input["value"]
-        response = requests.post(
+        logging.info("Step 2: Found FU2 input")
+        response = request_with_retry(
+            scraper,
+            "post",
             "https://freethemesy.com/dld.php",
-            headers=default_headers,
             data={"FU2": FU2},
+            headers={"Referer": "https://search.technews24.site/"},
         )
         ss_match = re.search("var sss = '(.*?)'; var", response.text)
         fetch_match = re.search("_0x12fb2a=(.*?);_0x3073", response.text)
-        if not ss_match or not fetch_match:
-            print("Could not find JS variables sss or array")
+        if not fetch_match:
+            logging.info("Specific regex failed, trying generic pattern for JS array")
+            fetch_match = re.search(
+                "var\\s+(_0x[a-f0-9]+)\\s*=\\s*(\\[.*?\\]);", response.text
+            )
+            if fetch_match:
+                fetch_str_list = fetch_match.group(2)
+            else:
+                fetch_str_list = None
+        else:
+            fetch_str_list = fetch_match.group(1)
+        if not ss_match or not fetch_str_list:
+            logging.error(
+                "Step 3 Failed: Could not find JS variables sss or array in dld.php response"
+            )
+            logging.debug(f"Response snippet: {response.text[:500]}")
             return []
         ss = ss_match.group(1)
-        fetch_str_list = fetch_match.group(1)
-        fetch_str_list = ast.literal_eval(fetch_str_list)
-        v = fetch_str_list[18]
+        try:
+            fetch_str_list = ast.literal_eval(fetch_str_list)
+            v = fetch_str_list[18]
+        except Exception as ast_err:
+            logging.exception(f"Step 3 Failed: AST parsing error: {ast_err}")
+            return []
+        logging.info("Step 3: Extracted sss and v variables")
         final_url = "https://freethemesy.com/new/l/api/m"
         payload = {"s": ss, "v": v}
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
             "Referer": "https://freethemesy.com/dld.php",
             "Origin": "https://freethemesy.com",
             "X-Requested-With": "XMLHttpRequest",
             "Content-Type": "application/x-www-form-urlencoded",
         }
-        final_response_down_page = requests.post(
-            final_url, data=payload, headers=headers
-        ).text.strip()
-        response = requests.get(final_response_down_page, headers=default_headers)
+        final_response_obj = request_with_retry(
+            scraper, "post", final_url, data=payload, headers=headers
+        )
+        final_response_down_page = final_response_obj.text.strip()
+        if not final_response_down_page.startswith("http"):
+            logging.error(
+                f"Step 4 Failed: API returned non-URL: {final_response_down_page[:100]}"
+            )
+            return []
+        logging.info(
+            f"Step 4: Received final download page URL: {final_response_down_page}"
+        )
+        response = request_with_retry(scraper, "get", final_response_down_page)
         soup = BeautifulSoup(response.text, "html.parser")
         links = extract_all_links(soup)
+        logging.info(
+            f"Step 5: Extracted {(len(links) if isinstance(links, list) else 0)} raw link groups"
+        )
         if isinstance(links, list):
             filtered_links = []
             for item in links:
@@ -227,35 +315,40 @@ def get_download_links(url):
                     if ".me" not in item["url"]:
                         filtered_links.append(item)
             links = filtered_links
+        logging.info(f"Final: Returning {len(links)} filtered link groups")
         return links
     except Exception as e:
-        logging.exception(f"Error extracting download links: {e}")
+        logging.exception(f"CRITICAL Error extracting download links: {e}")
         return []
 
 
 def get_main_link_(url):
-    default_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-    }
+    scraper = get_scraper()
     try:
-        response = requests.get(url, headers=default_headers)
+        response = request_with_retry(scraper, "get", url)
         soup = BeautifulSoup(response.text, "html.parser")
         fu5_input = soup.find("input", {"type": "hidden", "name": "FU5"})
         if not fu5_input:
             return "Error: FU5 not found"
         FU5 = fu5_input["value"]
-        response = requests.post(
+        response = request_with_retry(
+            scraper,
+            "post",
             "https://sharelink-3.site/dld.php",
-            headers=default_headers,
             data={"FU5": FU5},
+            headers={"Referer": url},
         )
         soup = BeautifulSoup(response.text, "html.parser")
         fu7_input = soup.find("input", {"type": "hidden", "name": "FU7"})
         if not fu7_input:
             return "Error: FU7 not found"
         FU7 = fu7_input["value"]
-        response = requests.post(
-            "https://sharelink-3.site/blog/", headers=default_headers, data={"FU7": FU7}
+        response = request_with_retry(
+            scraper,
+            "post",
+            "https://sharelink-3.site/blog/",
+            data={"FU7": FU7},
+            headers={"Referer": "https://sharelink-3.site/dld.php"},
         )
         sss_match = re.search("var sss = '(.*?)';", response.text)
         v_match = re.search("v: '(.*?)'", response.text)
@@ -268,9 +361,12 @@ def get_main_link_(url):
             "Content-Type": "application/json",
             "Accept": "application/json",
             "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://sharelink-3.site/blog/",
         }
         payload = {"s": sss, "v": __v}
-        response = requests.post(url_api, headers=headers, data=json.dumps(payload))
+        response = request_with_retry(
+            scraper, "post", url_api, headers=headers, json=payload
+        )
         return response.text
     except Exception as e:
         logging.exception(f"Error getting main link: {e}")

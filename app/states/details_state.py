@@ -51,7 +51,10 @@ class DetailsState(rx.State):
         self.direct_link = ""
         yield
         try:
+            logging.info(f"Fetching links for: {self.movie_url}")
             raw_links = get_download_links(self.movie_url)
+            if not raw_links:
+                logging.warning(f"No raw links returned for {self.movie_url}")
             normalized = []
             standalone_links = []
             for item in raw_links:
@@ -89,10 +92,19 @@ class DetailsState(rx.State):
                 )
             self.download_groups = normalized
             if not normalized:
-                yield rx.toast.info("No download links found.")
+                yield rx.toast.error(
+                    "No links found. The site might be blocking our request or the structure changed.",
+                    duration=5000,
+                    close_button=True,
+                )
         except Exception as e:
-            logging.exception(f"Error fetching links: {e}")
-            yield rx.toast.error("Failed to fetch links.")
+            error_type = type(e).__name__
+            logging.exception(f"Error fetching links ({error_type}): {e}")
+            yield rx.toast.error(
+                f"Link extraction failed ({error_type}): {str(e)}",
+                duration=6000,
+                close_button=True,
+            )
         finally:
             self.is_fetching_links = False
 
